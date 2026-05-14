@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "dev": "node dev-server.cjs",
+    "start": "node dev-server.cjs"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2"
+  }
+}
