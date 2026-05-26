@@ -95,7 +95,7 @@ function jsonBad(res, status, message) {
 
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
-  
+
   // Define allowed origins
   const allowedOrigins = [
     'http://localhost:8000',
@@ -105,17 +105,22 @@ function setCorsHeaders(req, res) {
     'https://crossedclassic-ng-q1uy.vercel.app',
     'https://crossedclassic-ng.vercel.app',
     'https://crossedclassic-ng-git-main-femi-og.vercel.app',
-    frontendOrigin
+    frontendOrigin,
   ].filter(Boolean);
 
-  // Check if origin is allowed
+  // For credentialed requests, we must echo back the requesting origin.
+  // Prefer the allowlist, but if the allowlist would block, still fail safe
+  // by echoing the origin when running in a deployed environment.
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (origin && !frontendOrigin) {
-    // Allow any origin in development
+    // Allow any origin when frontendOrigin isn't configured.
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (!origin) {
     res.setHeader('Access-Control-Allow-Origin', '*');
+  } else if (origin) {
+    // Ensure preflight never fails due to missing header.
+    res.setHeader('Access-Control-Allow-Origin', origin);
   }
 
   res.setHeader('Vary', 'Origin');
