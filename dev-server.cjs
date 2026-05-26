@@ -1,499 +1,837 @@
 require('dotenv').config();
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-
-const root = __dirname;
-const basePort = Number(process.env.PORT || 8000);
-const maxPort = Number(process.env.PORT_FALLBACK_MAX || (basePort + 10));
-const ordersFile = path.join(root, 'orders.json');
-const usersFile = path.join(root, 'users.json');
-const authSessionSecret = process.env.AUTH_SESSION_SECRET || 'CHANGE_ME_SESSION_SECRET';
-
-
 const crypto = require('crypto');
 
+const root = __dirname;
+const staticRoot = path.resolve(root, '..', 'crossed classic');
+
+const PORT = Number(process.env.PORT || 8000);
+const isProduction = process.env.NODE_ENV === 'production';
+const frontendOrigin = String(process.env.FRONTEND_ORIGIN || '').trim();
+
+const usersFile = path.join(root, 'users.json');
+const ordersFile = path.join(root, 'orders.json');
+
+const authSessionSecret =
+  process.env.AUTH_SESSION_SECRET || 'CHANGE_ME_SESSION_SECRET';
+
+
+
+
+
+/* =========================
+   HELPERS
+========================= */
+
 function base64url(input) {
-  return Buffer.from(input).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return Buffer
+    .from(input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
 }
 
 function sign(data) {
-  return base64url(crypto.createHmac('sha256', authSessionSecret).update(data).digest());
+  return base64url(
+    crypto
+      .createHmac('sha256', authSessionSecret)
+      .update(data)
+      .digest()
+  );
 }
 
 function hashPassword(password, salt) {
-  return crypto.createHmac('sha256', salt).update(password).digest('hex');
+  return crypto
+    .createHmac('sha256', salt)
+    .update(password)
+    .digest('hex');
+}
+
+function normalizeEmail(email) {
+  return String(email || '')
+    .trim()
+    .toLowerCase();
+}
+
+function getAdminEmail() {
+  return normalizeEmail(process.env.ADMIN_EMAIL);
+}
+
+function isAdminUser(user) {
+  const adminEmail = getAdminEmail();
+  return Boolean(user && adminEmail && normalizeEmail(user.email) === adminEmail);
 }
 
 function parseCookies(cookieHeader) {
   const out = {};
+
   if (!cookieHeader) return out;
+
   cookieHeader.split(';').forEach(part => {
     const [k, ...rest] = part.trim().split('=');
+
     if (!k) return;
+
     out[k] = decodeURIComponent(rest.join('=') || '');
   });
+
   return out;
 }
 
-function getSession(req) {
-  const cookies = parseCookies(req.headers.cookie);
-  const token = cookies.session;
-  if (!token) return null;
-  const [payloadB64, sig] = token.split('.');
-  if (!payloadB64 || !sig) return null;
-  const expected = sign(payloadB64);
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-  try {
-    const payloadJson = Buffer.from(payloadB64, 'base64').toString('utf8');
-    const payload = JSON.parse(payloadJson);
-    if (!payload || !payload.userId || !payload.exp) return null;
-    if (Date.now() > payload.exp) return null;
-    return payload;
-  } catch {
-    return null;
-  }
+function sendJson(res, status, payload) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+  });
+
+  res.end(JSON.stringify(payload));
 }
 
-const types = {
+function jsonBad(res, status, message) {
+  sendJson(res, status, {
+    ok: false,
+    error: message,
+  });
+}
 
-  '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-};
+function setCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+  const localOrigins = new Set([
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+    'http://localhost:5500',
+    'http://127.0.0.1:5500',
+  ]);
+  const allowedOrigins = new Set(
+    [frontendOrigin, ...localOrigins].filter(Boolean)
+  );
 
-function sendJson(res, status, payload) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify(payload));
+  if (origin && (!frontendOrigin || allowedOrigins.has(origin))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (!origin) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+}
+
+function sessionCookie(token, maxAge) {
+  const sameSite = isProduction ? 'SameSite=None; Secure' : 'SameSite=Lax';
+  return `session=${encodeURIComponent(token)}; HttpOnly; Path=/; ${sameSite}; Max-Age=${maxAge}`;
 }
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
+
     req.on('data', chunk => {
       body += chunk;
+
       if (body.length > 1_000_000) {
         req.destroy();
-        reject(new Error('Request body too large'));
+        reject(new Error('Body too large'));
       }
     });
+
     req.on('end', () => resolve(body));
+
     req.on('error', reject);
   });
 }
 
 
+
+
+
+/* =========================
+   USERS
+========================= */
+
 function loadUsers() {
-  if (!fs.existsSync(usersFile)) return [];
+  if (!fs.existsSync(usersFile)) {
+    return [];
+  }
+
   try {
-    return JSON.parse(fs.readFileSync(usersFile, 'utf8') || '[]');
+    return JSON.parse(
+      fs.readFileSync(usersFile, 'utf8') || '[]'
+    );
   } catch {
     return [];
   }
 }
 
 function saveUsers(users) {
-  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
+  fs.writeFileSync(
+    usersFile,
+    JSON.stringify(users, null, 2)
+  );
+
+  // Also mirror users to the static frontend copy so the
+  // `crossed classic/users.json` file reflects the same data
+  // (helps when inspecting from the frontend folder).
+  try {
+    const staticUsersFile = path.join(staticRoot, 'users.json');
+    fs.writeFileSync(staticUsersFile, JSON.stringify(users, null, 2));
+  } catch (err) {
+    // Non-fatal: continue if unable to write to static copy
+  }
 }
 
+
+function loadOrders() {
+  if (!fs.existsSync(ordersFile)) return [];
+  try { return JSON.parse(fs.readFileSync(ordersFile, 'utf8') || '[]'); } catch { return []; }
+}
+
+function saveOrders(orders) {
+  try {
+    fs.writeFileSync(ordersFile, JSON.stringify(orders, null, 2));
+  } catch (err) {
+    // ignore
+  }
+}
+
+
+
+
+
+/* =========================
+   SESSION
+========================= */
+
 function makeSessionToken(userId) {
-  const payload = { userId, exp: Date.now() + 1000 * 60 * 60 * 24 * 7 }; // 7 days
+  const payload = {
+    userId,
+    exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
+  };
+
   const payloadJson = JSON.stringify(payload);
-  const payloadB64 = Buffer.from(payloadJson, 'utf8').toString('base64');
+
+  const payloadB64 = Buffer
+    .from(payloadJson, 'utf8')
+    .toString('base64');
+
   const sig = sign(payloadB64);
+
   return `${payloadB64}.${sig}`;
 }
 
-async function saveOrder(req, res) {
+function getSession(req) {
   try {
+    const cookies = parseCookies(req.headers.cookie);
 
-    const rawBody = await readBody(req);
-    const order = JSON.parse(rawBody || '{}');
-    const now = new Date().toISOString();
-    const session = getSession(req);
-    const userId = session?.userId || null;
-    const savedOrder = {
+    const token = cookies.session;
 
-      id: order.reference || `CC-${Date.now().toString(36).toUpperCase()}`,
-      createdAt: now,
-      userId,
-      ...order,
-    };
+    if (!token) return null;
 
+    const [payloadB64, sig] = token.split('.');
 
-    let orders = [];
-    if (fs.existsSync(ordersFile)) {
-      orders = JSON.parse(fs.readFileSync(ordersFile, 'utf8') || '[]');
+    if (!payloadB64 || !sig) return null;
+
+    const expected = sign(payloadB64);
+
+    if (sig !== expected) return null;
+
+    const payloadJson = Buffer
+      .from(payloadB64, 'base64')
+      .toString('utf8');
+
+    const payload = JSON.parse(payloadJson);
+
+    if (!payload.userId || !payload.exp) {
+      return null;
     }
 
-    orders.push(savedOrder);
-    fs.writeFileSync(ordersFile, JSON.stringify(orders, null, 2));
-    console.log(`NEW ORDER: ${savedOrder.reference} - ${savedOrder.product} - ₦${savedOrder.total}`);
-    sendJson(res, 201, { ok: true, order: savedOrder });
-  } catch (error) {
-    sendJson(res, 400, { ok: false, error: 'Could not save order' });
-  }
-}
+    if (Date.now() > payload.exp) {
+      return null;
+    }
 
-function jsonBad(res, status, message) {
-  sendJson(res, status, { ok: false, error: message });
-}
+    return payload;
 
-
-function requireAdmin(req, res) {
-  const session = getSession(req);
-  if (!session) {
-    jsonBad(res, 401, 'Not logged in');
-    return null;
-  }
-
-  const users = loadUsers();
-  const user = users.find(u => u.id === session.userId) || null;
-  if (!user) {
-    jsonBad(res, 401, 'Invalid session');
-    return null;
-  }
-
-  if (!process.env.ADMIN_EMAIL && !process.env.ADMIN_USER_ID) {
-    jsonBad(res, 403, 'Admin not configured');
-    return null;
-  }
-
-  if (!isAdminUser(user)) {
-    jsonBad(res, 403, 'Forbidden');
-    return null;
-  }
-  return user;
-}
-
-function ordersLoad() {
-  if (!fs.existsSync(ordersFile)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(ordersFile, 'utf8') || '[]');
   } catch {
-    return [];
+    return null;
   }
 }
 
-function ordersSave(orders) {
-  fs.writeFileSync(ordersFile, JSON.stringify(orders, null, 2));
-}
 
-function normalizeStatus(st) {
-  return String(st || '').toLowerCase();
-}
 
-function isAdminUser(user) {
-  if (!user) return false;
-  const adminEmail = process.env.ADMIN_EMAIL;
-  const adminUserId = process.env.ADMIN_USER_ID;
-  return (adminEmail && user.email && user.email.toLowerCase() === String(adminEmail).toLowerCase()) ||
-         (adminUserId && user.id === adminUserId);
-}
 
-function createServer() {
-  return http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url.split('?')[0] === '/api/orders/admin/summary') {
-    const admin = requireAdmin(req, res);
-    if (!admin) return;
 
-    const orders = ordersLoad();
-    const summary = {
-      totalOrders: orders.length,
-      totalPending: 0,
-      totalProcessing: 0,
-      totalShipped: 0,
-      totalDelivered: 0,
-      reviewsCount: 0,
-      avgOrderValue: 0,
-    };
+/* =========================
+   STATIC FILE TYPES
+========================= */
 
-    let totalValue = 0;
-    let valueCount = 0;
+const types = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+};
 
-    for (const o of orders) {
-      const st = normalizeStatus(o.status);
-      if (!st || ['pending','review','unprocessed'].includes(st)) summary.totalPending++;
-      else if (st === 'processing') summary.totalProcessing++;
-      else if (['shipped','ship','in transit'].includes(st)) summary.totalShipped++;
-      else if (['delivered','complete','completed'].includes(st)) summary.totalDelivered++;
-      
-      if (o.adminReview) {
-        summary.reviewsCount++;
+
+
+
+
+/* =========================
+   SERVER
+========================= */
+
+const server = http.createServer(async (req, res) => {
+
+  setCorsHeaders(req, res);
+
+
+
+
+
+  /* =========================
+     OPTIONS
+  ========================= */
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+
+
+
+
+  /* =========================
+     SIGNUP
+  ========================= */
+
+  if (
+    req.method === 'POST' &&
+    req.url === '/api/auth/signup'
+  ) {
+
+    try {
+
+      const rawBody = await readBody(req);
+
+      const body = JSON.parse(rawBody || '{}');
+
+      const email = normalizeEmail(body.email);
+      const password = String(body.password || '').trim();
+
+      const name = String(body.name || '').trim();
+      const phone = String(body.phone || '').trim();
+      const address = String(body.address || '').trim();
+
+      if (!email || !password) {
+        return jsonBad(
+          res,
+          400,
+          'Email and password required'
+        );
       }
 
-      const val = o.total ?? o.unitPrice;
-      const num = Number(val);
-      if (Number.isFinite(num)) {
-        totalValue += num;
-        valueCount++;
+      const users = loadUsers();
+
+      const existing = users.find(
+        u => normalizeEmail(u.email) === email
+      );
+
+      if (existing) {
+        return jsonBad(
+          res,
+          409,
+          'User already exists'
+        );
       }
+
+      const salt =
+        crypto.randomBytes(16).toString('hex');
+
+      const pwHash =
+        hashPassword(password, salt);
+
+      const user = {
+        id: 'u_' + crypto.randomBytes(16).toString('hex'),
+        email,
+        name,
+        phone: phone || '',
+        address: address || '',
+        profilePic: '',
+        salt,
+        pwHash,
+        createdAt: new Date().toISOString(),
+      };
+
+      users.push(user);
+
+      saveUsers(users);
+
+      console.log('NEW USER:', email);
+
+      const sessionToken =
+        makeSessionToken(user.id);
+
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Set-Cookie': sessionCookie(sessionToken, 60 * 60 * 24 * 7),
+      });
+
+      res.end(JSON.stringify({
+        ok: true,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+        },
+      }));
+
+    } catch (err) {
+
+      console.error('SIGNUP ERROR:', err);
+
+      jsonBad(res, 400, 'Signup failed');
     }
 
-    summary.avgOrderValue = valueCount ? (totalValue / valueCount) : 0;
-
-    return sendJson(res, 200, { ok: true, summary });
+    return;
   }
 
-  if (req.method === 'GET' && req.url.split('?')[0] === '/api/orders/admin') {
-    const admin = requireAdmin(req, res);
-    if (!admin) return;
 
-    const orders = ordersLoad();
-    orders.sort((a,b) => {
-      const da = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const db = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      return db - da;
-    });
 
-    return sendJson(res, 200, { ok: true, orders });
-  }
 
-  if (req.method === 'POST' && req.url.split('?')[0].startsWith('/api/orders/') && req.url.split('?')[0].endsWith('/admin/status')) {
-    const admin = requireAdmin(req, res);
-    if (!admin) return;
 
-    const urlPath = req.url.split('?')[0];
-    const parts = urlPath.split('/');
-    // ['', 'api', 'orders', ':id', 'admin', 'status']
-    const orderId = parts[3];
+  /* 
+     Login
+   */
 
-    let orders = ordersLoad();
-    const idx = orders.findIndex(o => String(o.id) === String(orderId) || String(o.reference) === String(orderId));
-    if (idx < 0) return jsonBad(res, 404, 'Order not found');
+  if (
+    req.method === 'POST' &&
+    req.url === '/api/auth/login'
+  ) {
 
-    (async () => {
-      try {
-        const rawBody = await readBody(req);
-        const body = JSON.parse(rawBody || '{}');
+    try {
 
-        const now = new Date().toISOString();
-        orders[idx] = {
-          ...orders[idx],
-          status: body.status ?? orders[idx].status,
-          adminReview: body.adminReview ?? orders[idx].adminReview,
-          adminNotes: body.adminNotes ?? orders[idx].adminNotes,
-          updatedAt: now,
-        };
+      const rawBody = await readBody(req);
 
-        ordersSave(orders);
-        return sendJson(res, 200, { ok: true, order: orders[idx] });
-      } catch {
-        return jsonBad(res, 400, 'Could not update');
+      const body = JSON.parse(rawBody || '{}');
+
+      const email =
+        normalizeEmail(body.email);
+
+      const password =
+        String(body.password || '').trim();
+
+      console.log('LOGIN ATTEMPT:', {
+        email,
+      });
+
+      if (!email || !password) {
+        return jsonBad(
+          res,
+          400,
+          'Email and password required'
+        );
       }
-    })();
+
+      const users = loadUsers();
+
+      const user = users.find(
+        u => normalizeEmail(u.email) === email
+      );
+
+      console.log(
+        'FOUND USER:',
+        !!user
+      );
+
+      if (!user) {
+        return jsonBad(
+          res,
+          401,
+          'Invalid credentials'
+        );
+      }
+
+      const generatedHash =
+        hashPassword(password, user.salt);
+
+      console.log(
+        'PASSWORD MATCH:',
+        generatedHash === user.pwHash
+      );
+
+      if (generatedHash !== user.pwHash) {
+        return jsonBad(
+          res,
+          401,
+          'Invalid credentials'
+        );
+      }
+
+      const sessionToken =
+        makeSessionToken(user.id);
+
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Set-Cookie': sessionCookie(sessionToken, 60 * 60 * 24 * 7),
+      });
+
+      res.end(JSON.stringify({
+        ok: true,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+        },
+      }));
+
+    } catch (err) {
+
+      console.error('LOGIN ERROR:', err);
+
+      jsonBad(res, 400, 'Login failed');
+    }
 
     return;
   }
 
-  if (req.method === 'POST' && req.url.split('?')[0] === '/api/auth/signup') {
-    (async () => {
-      try {
-        const rawBody = await readBody(req);
-        const body = JSON.parse(rawBody || '{}');
-        const { email, password, name, phone, address, profilePic } = body;
-        if (!email || !password) return jsonBad(res, 400, 'Email and password required');
-        const users = loadUsers();
-        if (users.some(u => u.email.toLowerCase() === String(email).toLowerCase())) {
-          return jsonBad(res, 409, 'User already exists');
-        }
-        const id = 'u_' + crypto.randomBytes(16).toString('hex');
-        const salt = crypto.randomBytes(16).toString('hex');
-        const pwHash = hashPassword(String(password), salt);
-        const user = {
-          id,
-          email: String(email),
-          name: name ? String(name) : '',
-          phone: phone ? String(phone) : '',
-          address: address ? String(address) : '',
-          profilePic: typeof profilePic === 'string' ? profilePic : '',
-          salt,
-          pwHash,
-          createdAt: new Date().toISOString(),
-        };
-        users.push(user);
-        saveUsers(users);
-        console.log(`NEW SIGNUP: ${email} (${name})`);
-        const sessionToken = makeSessionToken(id);
-        res.writeHead(200, {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Set-Cookie': `session=${encodeURIComponent(sessionToken)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${60*60*24*7}`,
-        });
-        res.end(JSON.stringify({ ok: true, user: { id, email: user.email, name: user.name, phone: user.phone || '', address: user.address || '', profilePic: user.profilePic }, isAdmin: isAdminUser(user) }));
-      } catch {
-        jsonBad(res, 400, 'Signup failed');
-      }
-    })();
-    return;
-  }
 
-  if (req.method === 'POST' && req.url.split('?')[0] === '/api/auth/login') {
-    (async () => {
-      try {
-        const rawBody = await readBody(req);
-        const body = JSON.parse(rawBody || '{}');
-        const { email, password } = body;
-        if (!email || !password) return jsonBad(res, 400, 'Email and password required');
-        const users = loadUsers();
-        const user = users.find(u => u.email.toLowerCase() === String(email).toLowerCase());
-        if (!user) return jsonBad(res, 401, 'Invalid credentials');
-        const pwHash = hashPassword(String(password), user.salt);
-        if (pwHash !== user.pwHash) return jsonBad(res, 401, 'Invalid credentials');
-        const sessionToken = makeSessionToken(user.id);
-        res.writeHead(200, {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Set-Cookie': `session=${encodeURIComponent(sessionToken)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${60*60*24*7}`,
-        });
-        res.end(JSON.stringify({ ok: true, user: { id: user.id, email: user.email, name: user.name, profilePic: user.profilePic || '' }, isAdmin: isAdminUser(user) }));
-      } catch (err) {
-        console.error('Login error:', err);
-        jsonBad(res, 400, err?.message || 'Login failed');
-      }
-    })();
-    return;
-  }
 
-  if (req.method === 'POST' && req.url.split('?')[0] === '/api/auth/profile') {
+
+
+  /* 
+     Current User
+   */
+
+  if (
+    req.method === 'GET' &&
+    req.url === '/api/auth/me'
+  ) {
+
     const session = getSession(req);
-    if (!session) return jsonBad(res, 401, 'Not logged in');
 
-    (async () => {
-      try {
-        const rawBody = await readBody(req);
-        const body = JSON.parse(rawBody || '{}');
-        const { name, phone, address, profilePic } = body;
-        const users = loadUsers();
-        const idx = users.findIndex(u => u.id === session.userId);
-        if (idx < 0) return jsonBad(res, 401, 'Invalid session');
+    if (!session) {
+      return sendJson(res, 200, {
+        ok: true,
+        user: null,
+      });
+    }
 
-        if (typeof name === 'string') users[idx].name = String(name).trim();
-        if (typeof profilePic === 'string') users[idx].profilePic = profilePic;
-        if (typeof phone === 'string') users[idx].phone = String(phone).trim();
-        if (typeof address === 'string') users[idx].address = String(address).trim();
-        saveUsers(users);
+    const users = loadUsers();
 
-        const user = users[idx];
-        return sendJson(res, 200, {
-          ok: true,
-          user: {
+    const user = users.find(
+      u => u.id === session.userId
+    );
+
+    return sendJson(res, 200, {
+      ok: true,
+      user: user
+        ? {
             id: user.id,
             email: user.email,
             name: user.name,
             phone: user.phone || '',
             address: user.address || '',
             profilePic: user.profilePic || '',
-          },
-          isAdmin: isAdminUser(user),
-        });
-      } catch (err) {
-        console.error('Profile update error:', err);
-        return jsonBad(res, 400, 'Could not update profile');
-      }
-    })();
-    return;
-  }
-
-  if (req.method === 'GET' && req.url.split('?')[0] === '/api/auth/me') {
-    const session = getSession(req);
-    if (!session) return sendJson(res, 200, { ok: true, user: null, isAdmin: false });
-    const users = loadUsers();
-    const user = users.find(u => u.id === session.userId) || null;
-    return sendJson(res, 200, {
-      ok: true,
-      user: user ? { id: user.id, email: user.email, name: user.name, profilePic: user.profilePic || '' } : null,
-      isAdmin: user ? isAdminUser(user) : false,
+          }
+        : null,
+      isAdmin: isAdminUser(user),
     });
   }
 
-  if ((req.method === 'POST' || req.method === 'GET') && req.url.split('?')[0] === '/api/auth/logout') {
-    // Accept both POST and GET to avoid frontend/network/proxy mismatches.
+
+
+
+
+  /* 
+     Logout
+  */
+
+  if (
+    req.method === 'POST' &&
+    req.url === '/api/auth/logout'
+  ) {
+
     res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Set-Cookie': 'session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0',
+      'Content-Type': 'application/json',
+      'Set-Cookie': sessionCookie('', 0),
     });
-    return res.end(JSON.stringify({ ok: true }));
-  }
 
-  if (req.method === 'GET' && req.url.split('?')[0] === '/api/orders/me') {
-    const session = getSession(req);
-    if (!session) return jsonBad(res, 401, 'Not logged in');
-    const ordersFilePath = ordersFile;
-    let orders = [];
-    if (fs.existsSync(ordersFilePath)) {
-      orders = JSON.parse(fs.readFileSync(ordersFilePath, 'utf8') || '[]');
-    }
-    const mine = orders.filter(o => o.userId === session.userId);
-    return sendJson(res, 200, { ok: true, orders: mine });
-  }
+    res.end(JSON.stringify({
+      ok: true,
+    }));
 
-  // (Public orders read is available below; keep routing order clean.)
-  if (req.method === 'GET' && req.url.split('?')[0].startsWith('/api/orders/track/')) {
-    const urlPath = req.url.split('?')[0];
-    const reference = urlPath.split('/api/orders/track/')[1];
-    if (!reference) return jsonBad(res, 400, 'Reference required');
-
-    const orders = ordersLoad();
-    const order = orders.find(o => String(o.reference) === String(reference) || String(o.id) === String(reference));
-    if (!order) return jsonBad(res, 404, 'Order not found');
-
-    return sendJson(res, 200, { ok: true, status: order.status || 'Pending' });
-  }
-
-  if (req.method === 'GET' && req.url.split('?')[0] === '/api/orders') {
-    let orders = [];
-    if (fs.existsSync(ordersFile)) {
-      orders = JSON.parse(fs.readFileSync(ordersFile, 'utf8') || '[]');
-    }
-    sendJson(res, 200, { ok: true, orders });
     return;
   }
 
-  const urlPath = decodeURIComponent(req.url.split('?')[0]);
-  const requested = urlPath === '/' ? '/index.html' : urlPath;
-  const filePath = path.normalize(path.join(root, requested));
 
-  if (!filePath.startsWith(root)) {
-    res.writeHead(403);
-    res.end('Forbidden');
-    return;
+  /*
+     Update profile
+  */
+  if (
+    req.method === 'POST' &&
+    req.url === '/api/auth/profile'
+  ) {
+    try {
+      const session = getSession(req);
+      if (!session) return jsonBad(res, 401, 'Not authenticated');
+
+      const rawBody = await readBody(req);
+      const body = JSON.parse(rawBody || '{}');
+
+      const users = loadUsers();
+      const user = users.find(u => u.id === session.userId);
+      if (!user) return jsonBad(res, 404, 'User not found');
+
+      user.name = String(body.name || user.name || '');
+      user.phone = String(body.phone || user.phone || '');
+      user.address = String(body.address || user.address || '');
+      if (body.profilePic) user.profilePic = String(body.profilePic);
+
+      saveUsers(users);
+
+      return sendJson(res, 200, { ok: true });
+    } catch (err) {
+      console.error('PROFILE SAVE ERROR:', err);
+      return jsonBad(res, 400, 'Could not save profile');
+    }
   }
 
-  fs.readFile(filePath, (error, data) => {
-    if (error) {
+
+  /*
+     Orders endpoint
+  */
+  if (
+    req.method === 'POST' &&
+    req.url === '/api/orders'
+  ) {
+    try {
+      const rawBody = await readBody(req);
+      const body = JSON.parse(rawBody || '{}');
+
+      const { reference, items, total, delivery } = body;
+      if (!reference || !Array.isArray(items) || typeof total !== 'number') {
+        return jsonBad(res, 400, 'Invalid order');
+      }
+
+      const orders = loadOrders();
+      const order = {
+        id: 'o_' + crypto.randomBytes(12).toString('hex'),
+        reference,
+        items,
+        total,
+        delivery: delivery || {},
+        createdAt: new Date().toISOString(),
+      };
+
+      orders.push(order);
+      saveOrders(orders);
+
+      // mirror to static folder too
+      try {
+        const staticOrdersFile = path.join(staticRoot, 'orders.json');
+        fs.writeFileSync(staticOrdersFile, JSON.stringify(orders, null, 2));
+      } catch (err) {}
+
+      return sendJson(res, 200, { ok: true, order });
+    } catch (err) {
+      console.error('ORDER SAVE ERROR:', err);
+      return jsonBad(res, 400, 'Could not save order');
+    }
+  }
+
+
+
+
+  /* 
+     Track Order
+  */
+  const trackMatch = req.url.match(/^\/api\/orders\/track\/(.+)$/);
+  if (req.method === 'GET' && trackMatch) {
+    try {
+      const reference = decodeURIComponent(trackMatch[1]);
+      const orders = loadOrders();
+      const order = orders.find(o => o.reference === reference);
+
+      if (!order) {
+        return jsonBad(res, 404, 'Order not found');
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        status: order.status || 'Confirmed',
+        order: {
+          reference: order.reference,
+          status: order.status || 'Confirmed',
+          items: order.items,
+          total: order.total,
+          delivery: order.delivery,
+          createdAt: order.createdAt,
+        },
+      });
+    } catch (err) {
+      console.error('TRACK ERROR:', err);
+      return jsonBad(res, 400, 'Could not fetch order');
+    }
+  }
+
+
+  /*
+     Admin endpoints: list orders and update status/notes
+   */
+  if (req.method === 'GET' && req.url === '/api/orders/admin') {
+    try {
+      const session = getSession(req);
+      if (!session) return jsonBad(res, 401, 'Not authenticated');
+
+      const users = loadUsers();
+      const user = users.find(u => u.id === session.userId);
+      const isAdmin = isAdminUser(user);
+      if (!isAdmin) return jsonBad(res, 403, 'Forbidden');
+
+      const orders = loadOrders();
+      return sendJson(res, 200, { ok: true, orders });
+    } catch (err) {
+      console.error('ADMIN LIST ERROR:', err);
+      return jsonBad(res, 400, 'Could not load orders');
+    }
+  }
+
+  const adminUpdateMatch = req.url.match(/^\/api\/orders\/(.+)\/admin\/status$/);
+  if (req.method === 'POST' && adminUpdateMatch) {
+    try {
+      const session = getSession(req);
+      if (!session) return jsonBad(res, 401, 'Not authenticated');
+
+      const users = loadUsers();
+      const user = users.find(u => u.id === session.userId);
+      const isAdmin = isAdminUser(user);
+      if (!isAdmin) return jsonBad(res, 403, 'Forbidden');
+
+      const rawBody = await readBody(req);
+      const body = JSON.parse(rawBody || '{}');
+      const status = String(body.status || '').trim();
+      const adminReview = String(body.adminReview || body.adminNotes || '').trim();
+
+      const ref = decodeURIComponent(adminUpdateMatch[1]);
+      const orders = loadOrders();
+      const idx = orders.findIndex(o => String(o.reference) === String(ref) || String(o.id) === String(ref));
+      if (idx === -1) return jsonBad(res, 404, 'Order not found');
+
+      orders[idx].status = status;
+      if (adminReview) orders[idx].adminReview = adminReview;
+      orders[idx].updatedAt = new Date().toISOString();
+
+      saveOrders(orders);
+      try { fs.writeFileSync(path.join(staticRoot, 'orders.json'), JSON.stringify(orders, null, 2)); } catch (e) {}
+
+      return sendJson(res, 200, { ok: true, order: orders[idx] });
+    } catch (err) {
+      console.error('ADMIN UPDATE ERROR:', err);
+      return jsonBad(res, 400, 'Could not update order');
+    }
+  }
+
+  if (req.method === 'GET' && req.url === '/api/orders/admin/summary') {
+    try {
+      const session = getSession(req);
+      if (!session) return jsonBad(res, 401, 'Not authenticated');
+
+      const users = loadUsers();
+      const user = users.find(u => u.id === session.userId);
+      if (!isAdminUser(user)) return jsonBad(res, 403, 'Forbidden');
+
+      const orders = loadOrders();
+      const countByStatus = status => orders.filter(order => {
+        const current = String(order.status || '').trim().toLowerCase();
+        if (status === 'pending') return !current || ['pending', 'review', 'unprocessed', 'confirmed'].includes(current);
+        if (status === 'shipped') return ['shipped', 'ship', 'in transit'].includes(current);
+        if (status === 'delivered') return ['delivered', 'complete', 'completed'].includes(current);
+        return current === status;
+      }).length;
+
+      const totalRevenue = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
+      const reviewsCount = orders.filter(order => String(order.adminReview || order.adminNotes || '').trim()).length;
+
+      return sendJson(res, 200, {
+        ok: true,
+        summary: {
+          totalOrders: orders.length,
+          totalRevenue,
+          totalPending: countByStatus('pending'),
+          totalProcessing: countByStatus('processing'),
+          totalShipped: countByStatus('shipped'),
+          totalDelivered: countByStatus('delivered'),
+          reviewsCount,
+          avgOrderValue: orders.length ? totalRevenue / orders.length : 0,
+        },
+      });
+    } catch (err) {
+      console.error('ADMIN SUMMARY ERROR:', err);
+      return jsonBad(res, 400, 'Could not load summary');
+    }
+  }
+
+
+
+
+  /* 
+     Static Files
+   */
+
+  const urlPath =
+    decodeURIComponent(req.url.split('?')[0]);
+
+  const requested =
+    urlPath === '/'
+      ? '/index.html'
+      : urlPath;
+
+  let filePath = path.join(
+    staticRoot,
+    requested
+  );
+
+  if (!fs.existsSync(filePath)) {
+    filePath = path.join(root, requested);
+  }
+
+  fs.readFile(filePath, (err, data) => {
+
+    if (err) {
       res.writeHead(404);
       res.end('Not found');
       return;
     }
 
     res.writeHead(200, {
-      'Content-Type': types[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
+      'Content-Type':
+        types[path.extname(filePath).toLowerCase()]
+        || 'application/octet-stream',
     });
+
     res.end(data);
   });
-  });
-}
 
-function bindServer(portToTry) {
-  const server = createServer();
-  server.once('error', err => {
-    if (err.code === 'EADDRINUSE' && portToTry < maxPort) {
-      const nextPort = portToTry + 1;
-      console.warn(`Port ${portToTry} is in use. Trying ${nextPort}...`);
-      bindServer(nextPort);
-      return;
-    }
+});
 
-    console.error('Server startup error:', err);
-    process.exit(1);
-  });
 
-  server.listen(portToTry, () => {
-  console.log(`Crossed Classic running on port ${portToTry}`);
- }); 
-}
 
-bindServer(basePort);
+
+
+/* 
+   Start
+ */
+
+server.listen(PORT, () => {
+  console.log(
+    `Crossed Classic running on port ${PORT}`
+  );
+});
