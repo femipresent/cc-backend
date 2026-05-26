@@ -18,10 +18,6 @@ const ordersFile = path.join(root, 'orders.json');
 const authSessionSecret =
   process.env.AUTH_SESSION_SECRET || 'CHANGE_ME_SESSION_SECRET';
 
-
-
-
-
 /* =========================
    HELPERS
 ========================= */
@@ -99,26 +95,34 @@ function jsonBad(res, status, message) {
 
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
-  const localOrigins = new Set([
+  
+  // Define allowed origins
+  const allowedOrigins = [
     'http://localhost:8000',
     'http://127.0.0.1:8000',
     'http://localhost:5500',
     'http://127.0.0.1:5500',
-  ]);
-  const allowedOrigins = new Set(
-    [frontendOrigin, ...localOrigins].filter(Boolean)
-  );
+    'https://crossedclassic-ng-q1uy.vercel.app',
+    'https://crossedclassic-ng.vercel.app',
+    'https://crossedclassic-ng-git-main-femi-og.vercel.app',
+    frontendOrigin
+  ].filter(Boolean);
 
-  if (origin && (!frontendOrigin || allowedOrigins.has(origin))) {
+  // Check if origin is allowed
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (origin && !frontendOrigin) {
+    // Allow any origin in development
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (!origin) {
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
 
   res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie, X-Requested-With');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
 }
 
 function sessionCookie(token, maxAge) {
@@ -145,10 +149,6 @@ function readBody(req) {
   });
 }
 
-
-
-
-
 /* =========================
    USERS
 ========================= */
@@ -173,9 +173,6 @@ function saveUsers(users) {
     JSON.stringify(users, null, 2)
   );
 
-  // Also mirror users to the static frontend copy so the
-  // `crossed classic/users.json` file reflects the same data
-  // (helps when inspecting from the frontend folder).
   try {
     const staticUsersFile = path.join(staticRoot, 'users.json');
     fs.writeFileSync(staticUsersFile, JSON.stringify(users, null, 2));
@@ -183,7 +180,6 @@ function saveUsers(users) {
     // Non-fatal: continue if unable to write to static copy
   }
 }
-
 
 function loadOrders() {
   if (!fs.existsSync(ordersFile)) return [];
@@ -197,10 +193,6 @@ function saveOrders(orders) {
     // ignore
   }
 }
-
-
-
-
 
 /* =========================
    SESSION
@@ -260,10 +252,6 @@ function getSession(req) {
   }
 }
 
-
-
-
-
 /* =========================
    STATIC FILE TYPES
 ========================= */
@@ -278,10 +266,6 @@ const types = {
   '.svg': 'image/svg+xml',
 };
 
-
-
-
-
 /* =========================
    SERVER
 ========================= */
@@ -290,23 +274,41 @@ const server = http.createServer(async (req, res) => {
 
   setCorsHeaders(req, res);
 
-
-
-
-
   /* =========================
-     OPTIONS
+     OPTIONS (CORS Preflight)
   ========================= */
 
   if (req.method === 'OPTIONS') {
+    // Set CORS headers for the preflight response
+    const origin = req.headers.origin;
+    const allowedOrigins = [
+      'http://localhost:8000',
+      'http://127.0.0.1:8000',
+      'http://localhost:5500',
+      'http://127.0.0.1:5500',
+      'https://crossedclassic-ng-q1uy.vercel.app',
+      'https://crossedclassic-ng.vercel.app',
+      'https://crossedclassic-ng-git-main-femi-og.vercel.app',
+      frontendOrigin
+    ].filter(Boolean);
+    
+    if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    } else if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+    
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie, X-Requested-With');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    
     res.writeHead(204);
     res.end();
     return;
   }
-
-
-
-
 
   /* =========================
      SIGNUP
@@ -403,10 +405,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-
-
-
-
   /* 
      Login
    */
@@ -502,10 +500,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-
-
-
-
   /* 
      Current User
    */
@@ -546,10 +540,6 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-
-
-
-
   /* 
      Logout
   */
@@ -570,7 +560,6 @@ const server = http.createServer(async (req, res) => {
 
     return;
   }
-
 
   /*
      Update profile
@@ -603,7 +592,6 @@ const server = http.createServer(async (req, res) => {
       return jsonBad(res, 400, 'Could not save profile');
     }
   }
-
 
   /*
      Orders endpoint
@@ -640,7 +628,6 @@ const server = http.createServer(async (req, res) => {
       orders.push(order);
       saveOrders(orders);
 
-      // mirror to static folder too
       try {
         const staticOrdersFile = path.join(staticRoot, 'orders.json');
         fs.writeFileSync(staticOrdersFile, JSON.stringify(orders, null, 2));
@@ -652,9 +639,6 @@ const server = http.createServer(async (req, res) => {
       return jsonBad(res, 400, 'Could not save order');
     }
   }
-
-
-
 
   /* 
      Track Order
@@ -707,7 +691,6 @@ const server = http.createServer(async (req, res) => {
       return jsonBad(res, 400, 'Could not fetch order');
     }
   }
-
 
   /*
      Admin endpoints: list orders and update status/notes
@@ -805,9 +788,6 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-
-
-
   /* 
      Static Files
    */
@@ -847,10 +827,6 @@ const server = http.createServer(async (req, res) => {
   });
 
 });
-
-
-
-
 
 /* 
    Start
