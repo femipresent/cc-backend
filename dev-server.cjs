@@ -96,7 +96,6 @@ function jsonBad(res, status, message) {
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
 
-  // Define allowed origins
   const allowedOrigins = [
     'http://localhost:8000',
     'http://127.0.0.1:8000',
@@ -108,18 +107,13 @@ function setCorsHeaders(req, res) {
     frontendOrigin,
   ].filter(Boolean);
 
-  // For credentialed requests, we must echo back the requesting origin.
-  // Prefer the allowlist, but if the allowlist would block, still fail safe
-  // by echoing the origin when running in a deployed environment.
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (origin && !frontendOrigin) {
-    // Allow any origin when frontendOrigin isn't configured.
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (!origin) {
     res.setHeader('Access-Control-Allow-Origin', '*');
   } else if (origin) {
-    // Ensure preflight never fails due to missing header.
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
 
@@ -127,7 +121,7 @@ function setCorsHeaders(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie, X-Requested-With');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
+  res.setHeader('Access-Control-Max-Age', '86400');
 }
 
 function sessionCookie(token, maxAge) {
@@ -284,7 +278,6 @@ const server = http.createServer(async (req, res) => {
   ========================= */
 
   if (req.method === 'OPTIONS') {
-    // Set CORS headers for the preflight response
     const origin = req.headers.origin;
     const allowedOrigins = [
       'http://localhost:8000',
@@ -325,24 +318,26 @@ const server = http.createServer(async (req, res) => {
   ) {
 
     try {
-
       const rawBody = await readBody(req);
-
-      const body = JSON.parse(rawBody || '{}');
+      
+      let body;
+      try {
+        body = JSON.parse(rawBody || '{}');
+      } catch (err) {
+        return jsonBad(res, 400, 'Invalid JSON format');
+      }
 
       const email = normalizeEmail(body.email);
       const password = String(body.password || '').trim();
-
       const name = String(body.name || '').trim();
       const phone = String(body.phone || '').trim();
       const address = String(body.address || '').trim();
 
-      if (!email || !password) {
-        return jsonBad(
-          res,
-          400,
-          'Email and password required'
-        );
+      if (!email) {
+        return jsonBad(res, 400, 'Email is required');
+      }
+      if (!password) {
+        return jsonBad(res, 400, 'Password is required');
       }
 
       const users = loadUsers();
@@ -352,18 +347,11 @@ const server = http.createServer(async (req, res) => {
       );
 
       if (existing) {
-        return jsonBad(
-          res,
-          409,
-          'User already exists'
-        );
+        return jsonBad(res, 409, 'User already exists');
       }
 
-      const salt =
-        crypto.randomBytes(16).toString('hex');
-
-      const pwHash =
-        hashPassword(password, salt);
+      const salt = crypto.randomBytes(16).toString('hex');
+      const pwHash = hashPassword(password, salt);
 
       const user = {
         id: 'u_' + crypto.randomBytes(16).toString('hex'),
@@ -378,13 +366,11 @@ const server = http.createServer(async (req, res) => {
       };
 
       users.push(user);
-
       saveUsers(users);
 
       console.log('NEW USER:', email);
 
-      const sessionToken =
-        makeSessionToken(user.id);
+      const sessionToken = makeSessionToken(user.id);
 
       res.writeHead(200, {
         'Content-Type': 'application/json',
@@ -401,10 +387,8 @@ const server = http.createServer(async (req, res) => {
       }));
 
     } catch (err) {
-
       console.error('SIGNUP ERROR:', err);
-
-      jsonBad(res, 400, 'Signup failed');
+      jsonBad(res, 500, 'Internal server error');
     }
 
     return;
@@ -420,66 +404,44 @@ const server = http.createServer(async (req, res) => {
   ) {
 
     try {
-
       const rawBody = await readBody(req);
+      
+      let body;
+      try {
+        body = JSON.parse(rawBody || '{}');
+      } catch (err) {
+        return jsonBad(res, 400, 'Invalid JSON format');
+      }
 
-      const body = JSON.parse(rawBody || '{}');
+      const email = normalizeEmail(body.email);
+      const password = String(body.password || '').trim();
 
-      const email =
-        normalizeEmail(body.email);
+      console.log('LOGIN ATTEMPT:', { email });
 
-      const password =
-        String(body.password || '').trim();
-
-      console.log('LOGIN ATTEMPT:', {
-        email,
-      });
-
-      if (!email || !password) {
-        return jsonBad(
-          res,
-          400,
-          'Email and password required'
-        );
+      if (!email) {
+        return jsonBad(res, 400, 'Email is required');
+      }
+      if (!password) {
+        return jsonBad(res, 400, 'Password is required');
       }
 
       const users = loadUsers();
+      const user = users.find(u => normalizeEmail(u.email) === email);
 
-      const user = users.find(
-        u => normalizeEmail(u.email) === email
-      );
-
-      console.log(
-        'FOUND USER:',
-        !!user
-      );
+      console.log('FOUND USER:', !!user);
 
       if (!user) {
-        return jsonBad(
-          res,
-          401,
-          'Invalid credentials'
-        );
+        return jsonBad(res, 401, 'Invalid credentials');
       }
 
-      const generatedHash =
-        hashPassword(password, user.salt);
-
-      console.log(
-        'PASSWORD MATCH:',
-        generatedHash === user.pwHash
-      );
+      const generatedHash = hashPassword(password, user.salt);
+      console.log('PASSWORD MATCH:', generatedHash === user.pwHash);
 
       if (generatedHash !== user.pwHash) {
-        return jsonBad(
-          res,
-          401,
-          'Invalid credentials'
-        );
+        return jsonBad(res, 401, 'Invalid credentials');
       }
 
-      const sessionToken =
-        makeSessionToken(user.id);
+      const sessionToken = makeSessionToken(user.id);
 
       res.writeHead(200, {
         'Content-Type': 'application/json',
@@ -496,10 +458,8 @@ const server = http.createServer(async (req, res) => {
       }));
 
     } catch (err) {
-
       console.error('LOGIN ERROR:', err);
-
-      jsonBad(res, 400, 'Login failed');
+      jsonBad(res, 500, 'Internal server error');
     }
 
     return;
@@ -578,7 +538,13 @@ const server = http.createServer(async (req, res) => {
       if (!session) return jsonBad(res, 401, 'Not authenticated');
 
       const rawBody = await readBody(req);
-      const body = JSON.parse(rawBody || '{}');
+      
+      let body;
+      try {
+        body = JSON.parse(rawBody || '{}');
+      } catch (err) {
+        return jsonBad(res, 400, 'Invalid JSON format');
+      }
 
       const users = loadUsers();
       const user = users.find(u => u.id === session.userId);
@@ -611,7 +577,13 @@ const server = http.createServer(async (req, res) => {
       const user = session ? users.find(u => u.id === session.userId) : null;
 
       const rawBody = await readBody(req);
-      const body = JSON.parse(rawBody || '{}');
+      
+      let body;
+      try {
+        body = JSON.parse(rawBody || '{}');
+      } catch (err) {
+        return jsonBad(res, 400, 'Invalid JSON format');
+      }
 
       const { reference, items, total, delivery } = body;
       if (!reference || !Array.isArray(items) || typeof total !== 'number') {
@@ -730,7 +702,14 @@ const server = http.createServer(async (req, res) => {
       if (!isAdmin) return jsonBad(res, 403, 'Forbidden');
 
       const rawBody = await readBody(req);
-      const body = JSON.parse(rawBody || '{}');
+      
+      let body;
+      try {
+        body = JSON.parse(rawBody || '{}');
+      } catch (err) {
+        return jsonBad(res, 400, 'Invalid JSON format');
+      }
+
       const status = String(body.status || '').trim();
       const adminReview = String(body.adminReview || body.adminNotes || '').trim();
 
