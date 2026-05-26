@@ -613,6 +613,10 @@ const server = http.createServer(async (req, res) => {
     req.url === '/api/orders'
   ) {
     try {
+      const session = getSession(req);
+      const users = loadUsers();
+      const user = session ? users.find(u => u.id === session.userId) : null;
+
       const rawBody = await readBody(req);
       const body = JSON.parse(rawBody || '{}');
 
@@ -621,16 +625,18 @@ const server = http.createServer(async (req, res) => {
         return jsonBad(res, 400, 'Invalid order');
       }
 
-      const orders = loadOrders();
       const order = {
         id: 'o_' + crypto.randomBytes(12).toString('hex'),
         reference,
         items,
         total,
         delivery: delivery || {},
+        userId: user ? user.id : undefined,
+        userEmail: user ? user.email : undefined,
         createdAt: new Date().toISOString(),
       };
 
+      const orders = loadOrders();
       orders.push(order);
       saveOrders(orders);
 
@@ -653,6 +659,26 @@ const server = http.createServer(async (req, res) => {
   /* 
      Track Order
   */
+  if (req.method === 'GET' && req.url === '/api/orders/my') {
+    try {
+      const session = getSession(req);
+      if (!session) return jsonBad(res, 401, 'Not authenticated');
+
+      const orders = loadOrders();
+      const myOrders = orders.filter(
+        o => String(o.userId || '') === String(session.userId)
+      );
+
+      return sendJson(res, 200, {
+        ok: true,
+        orders: myOrders,
+      });
+    } catch (err) {
+      console.error('MY ORDERS ERROR:', err);
+      return jsonBad(res, 400, 'Could not fetch orders');
+    }
+  }
+
   const trackMatch = req.url.match(/^\/api\/orders\/track\/(.+)$/);
   if (req.method === 'GET' && trackMatch) {
     try {
