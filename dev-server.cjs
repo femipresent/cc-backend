@@ -30,6 +30,9 @@ const isProduction =
 const frontendOrigin =
   String(process.env.FRONTEND_ORIGIN || '').trim();
 
+const adminEmail =
+  String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+
 const usersFile =
   path.join(root, 'users.json');
 
@@ -525,6 +528,11 @@ const server =
           const sessionToken =
             makeSessionToken(user.id);
 
+          const isAdmin =
+            adminEmail &&
+            normalizeEmail(user.email) ===
+            adminEmail;
+
           res.writeHead(200, {
             'Content-Type':
               'application/json',
@@ -539,10 +547,12 @@ const server =
           res.end(
             JSON.stringify({
               ok: true,
+              isAdmin: isAdmin,
               user: {
                 id: user.id,
                 email: user.email,
                 name: user.name,
+                isAdmin: isAdmin,
               },
             })
           );
@@ -640,6 +650,11 @@ const server =
             );
           }
 
+          const isAdmin =
+            adminEmail &&
+            normalizeEmail(user.email) ===
+            adminEmail;
+
           const sessionToken =
             makeSessionToken(user.id);
 
@@ -657,10 +672,12 @@ const server =
           res.end(
             JSON.stringify({
               ok: true,
+              isAdmin: isAdmin,
               user: {
                 id: user.id,
                 email: user.email,
                 name: user.name,
+                isAdmin: isAdmin,
               },
             })
           );
@@ -716,11 +733,18 @@ const server =
               session.userId
           );
 
+        const isAdmin =
+          user &&
+          adminEmail &&
+          normalizeEmail(user.email) ===
+          adminEmail;
+
         return sendJson(
           res,
           200,
           {
             ok: true,
+            isAdmin: isAdmin || false,
 
             user:
               user
@@ -728,6 +752,7 @@ const server =
                     id: user.id,
                     email: user.email,
                     name: user.name,
+                    isAdmin: isAdmin,
                   }
                 : null,
           }
