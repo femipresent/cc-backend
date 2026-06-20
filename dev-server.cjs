@@ -130,12 +130,21 @@ function setCorsHeaders(req, res) {
     'http://127.0.0.1:5500',
 
     'https://crossedclassic-ng-q1uy.vercel.app',
+    'https://crossedclassic-ng-q1uy-fafhvz0vp-femi-og.vercel.app',
     'https://crossedclassic-ng.vercel.app',
     'https://crossedclassic-ng-git-main-femi-og.vercel.app',
   ];
 
   if (frontendOrigin) {
-    allowedOrigins.push(frontendOrigin);
+    frontendOrigin
+      .split(',')
+      .map(s => String(s || '').trim())
+      .filter(Boolean)
+      .forEach(origin => {
+        if (!allowedOrigins.includes(origin)) {
+          allowedOrigins.push(origin);
+        }
+      });
   }
 
   if (
