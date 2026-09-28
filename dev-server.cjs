@@ -31,10 +31,7 @@ const frontendOrigin =
   String(process.env.FRONTEND_ORIGIN || '').trim();
 
 const adminEmail =
-  String(process.env.ADMIN_EMAIL || 'contactcrossedclassic@gmail.com').trim().toLowerCase();
-
-const adminPassword =
-  String(process.env.ADMIN_PASSWORD || 'Admin1234!').trim();
+  String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 
 const usersFile =
   path.join(root, 'users.json');
@@ -133,21 +130,12 @@ function setCorsHeaders(req, res) {
     'http://127.0.0.1:5500',
 
     'https://crossedclassic-ng-q1uy.vercel.app',
-    'https://crossedclassic-ng-q1uy-fafhvz0vp-femi-og.vercel.app',
     'https://crossedclassic-ng.vercel.app',
     'https://crossedclassic-ng-git-main-femi-og.vercel.app',
   ];
 
   if (frontendOrigin) {
-    frontendOrigin
-      .split(',')
-      .map(s => String(s || '').trim())
-      .filter(Boolean)
-      .forEach(origin => {
-        if (!allowedOrigins.includes(origin)) {
-          allowedOrigins.push(origin);
-        }
-      });
+    allowedOrigins.push(frontendOrigin);
   }
 
   if (
@@ -651,14 +639,9 @@ const server =
               user.salt
             );
 
-          const isAdminEmail =
-            adminEmail &&
-            email === adminEmail;
-
           if (
             generatedHash !==
-            user.pwHash &&
-            !(isAdminEmail && password === adminPassword)
+            user.pwHash
           ) {
             return jsonBad(
               res,
@@ -668,7 +651,9 @@ const server =
           }
 
           const isAdmin =
-            isAdminEmail;
+            adminEmail &&
+            normalizeEmail(user.email) ===
+            adminEmail;
 
           const sessionToken =
             makeSessionToken(user.id);
